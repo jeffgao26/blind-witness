@@ -160,6 +160,19 @@ constant/
 
 ---
 
+## Future features (post-MVP)
+
+- **In-app visual alert** — family web app polls `/status`; on `FALL_SUSPECTED` page
+  flips to full-screen red alert with sound. Zero external dependencies, dramatic demo.
+- **Voice call to family** — Twilio Voice calls family member and reads Claude's
+  `family_note` aloud. More urgent than a notification, harder to ignore.
+- **Outbound check-in call to elder** — Claude-generated voice prompt asking if they're
+  okay, response cancels escalation. Extends the existing TTS consent gate.
+- **Routine tracking** — per-hour expected-zone baseline, med reminder notifications.
+- **Night wandering detection** — extended absence during sleep hours triggers alert.
+
+---
+
 ## Honest gaps to name in the pitch
 
 - Baseline is seeded, not learned (real deploy needs days of data).
