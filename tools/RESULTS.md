@@ -27,10 +27,34 @@ Thresholds at test: `VY_FALL_THRESHOLD=150 px/s`, `ASPECT_FALL_THRESHOLD=1.2`,
 
 Confirms PRD §11 ("can't distinguish a fall from sitting down quickly") empirically.
 
-### Next experiments
-- **Round 2: raise capture resolution (640×480)** — test whether a cleaner mask tightens
-  aspect (does walk drop below ~1.5? do falls separate from sits?). `tools/blob.py` scales
-  area thresholds by resolution so the test is fair.
-- If still not separable: reframe the emergency trigger to sustained stillness / unexpected
-  prolonged absence (the robust signal + PRD thesis), with "possible fall" as a low-confidence
-  hint only.
+## Round 2 (640×480 @10fps) — run 3, 7 clips
+
+Same tooling, area/dilate scaled to resolution via `tools/blob.py` (fair A/B test).
+
+| clip | peak vy (px/s) | aspect @ peak vy | max aspect | fired |
+|---|---|---|---|---|
+| fall_side3   | 244 | 1.60 | 2.29 | no |
+| fall_toward3 | 217 | 0.72 | 1.33 | no |
+| fall_down3   | 230 | 0.47 | 1.33 | no |
+| sit3 (neg)   | 192 | 1.01 | 1.33 | no |
+| crouch3 (neg)| 274 | 0.87 | 1.55 | no |
+| couch3 (neg) | 268 | 0.69 | 1.33 | no |
+| walk3 (neg)  | 324 | 2.55 | 2.87 | no |
+
+### Verdict: higher resolution did NOT separate falls from non-falls — arguably worse.
+- `vy`: `walk3` (324) and `crouch3` (274) exceed every fall (217–244). Higher res amplified
+  centroid jitter.
+- aspect: `walk3` (2.87) tops everything; two of three falls sit at exactly 1.33.
+- The recurring **1.33** = the frame's 4:3 ratio → MOG2 flagged the whole frame as foreground
+  (lighting / auto-exposure shift), so the "person" box was the entire image. Global frame
+  changes corrupt any feature at any resolution.
+
+**Conclusion: the feature (centroid vy + bbox aspect from background subtraction) is the
+limit, not resolution.** 21 clips across two resolutions, zero separation. Matches PRD §11.
+
+## Decision
+Reframe the emergency trigger to **sustained stillness / unexpected prolonged absence**
+(the robust signal already produced by the Kalman covariance + ABSENT logic + pipeline
+baseline), which is the PRD thesis ("deviation from pattern, not diagnosis"). Keep
+"possible fall" only as a low-confidence hint to the pipeline, never the sole escalation
+reason. Real falls still surface as "went down and stopped moving."

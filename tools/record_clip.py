@@ -1,17 +1,16 @@
 """Guided clip recorder — live preview + bounding box + timed directive on the Pi
-touchscreen while recording, with a BATCH mode that runs all takes back-to-back.
+touchscreen while recording, with BATCH mode (all takes back-to-back) and a
+selectable capture resolution for A/B testing.
 
-Opens the camera ONCE, so preview + detection overlay + cue + record happen
-together. The on-screen bounding box / aspect readout / directive are drawn only on
-the displayed copy — the saved files are the RAW scaled frame at the production
-resolution (320x240 @10fps), so the analyzer sees exactly what the pipeline would.
-
-The live box turns RED when aspect crosses the fall threshold, so you can watch the
-tall->wide flip happen as you go down.
+Opens the camera ONCE: preview + detection overlay + cue + record together. The
+on-screen box / aspect readout / directive are drawn only on the displayed copy —
+saved files are the RAW frame at the chosen resolution. The live box turns RED when
+aspect crosses the fall threshold, so you can watch the tall->wide flip.
 
 Run over SSH so it renders on the touchscreen:
     cd ~/blind-witness
-    DISPLAY=:0 python3 tools/record_clip.py            # full batch (all takes)
+    DISPLAY=:0 python3 tools/record_clip.py              # batch run 1, SD (320x240)
+    DISPLAY=:0 python3 tools/record_clip.py 2 hd         # batch run 2, HD (640x480)
     DISPLAY=:0 python3 tools/record_clip.py fall1.mp4 fall   # single take
 Press q to abort.
 """
@@ -20,16 +19,19 @@ import sys
 import time
 
 import cv2
-import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from device.perception import MIN_CONTOUR_AREA, MAX_CONTOUR_AREA
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))   # repo root (device.*)
+sys.path.insert(0, HERE)                     # tools/ (blob)
 from device.state_machine import ASPECT_FALL_THRESHOLD
+from blob import make_bg, detect_blob
 
-OUT_W, OUT_H, FPS = 320, 240, 10
+FPS = 10
 DW, DH = 960, 720       # display size on the touchscreen
+OUT_W, OUT_H = 320, 240  # capture/save resolution (set from CLI)
+RESOLUTIONS = {"sd": (320, 240), "hd": (640, 480)}
 
-# --- timeline (seconds) — tweak these if you want more/less time ---
+# --- timeline (seconds) — tweak if you want more/less time ---
 OUT_PHASE = 3.0         # stay out of frame (background learning)
 WALKIN_END = 7.0        # walk in + get set, until this time
 ACTION_T = 11.0         # the moment to act (countdown runs WALKIN_END -> ACTION_T)
@@ -38,7 +40,6 @@ REC_MOVE = 14.0         # record length for the moving/baseline take
 INTERMISSION = 6.0      # seconds between takes to reset
 
 # (basename, mode, verb). mode "move" = keep moving; "action" = ready->countdown->DO->hold.
-# Filenames get a run number suffix so you can collect multiple rounds (walk2.mp4, ...).
 BASE_TAKES = [
     ("walk",        "move",   None),
     ("sit",         "action", "SIT DOWN"),
@@ -50,7 +51,7 @@ BASE_TAKES = [
 ]
 
 
-def takes_for_run(run: str):
+def takes_for_run(run):
     return [(f"{base}{run}.mp4", mode, verb) for base, mode, verb in BASE_TAKES]
 
 
@@ -61,27 +62,6 @@ def open_writer(path):
         if w.isOpened():
             return w, p
     raise RuntimeError("could not open any VideoWriter codec")
-
-
-def detect(small, fgbg):
-    """Mirror of device/perception.py detection (single largest blob). 320x240 in.
-    Returns (x, y, w, h, cx, cy, aspect) or None. For the live overlay only."""
-    mask = fgbg.apply(small)
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.dilate(mask, kernel, iterations=2)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    valid = [c for c in contours
-             if MIN_CONTOUR_AREA <= cv2.contourArea(c) <= MAX_CONTOUR_AREA]
-    if not valid:
-        return None
-    largest = max(valid, key=cv2.contourArea)
-    M = cv2.moments(largest)
-    if M["m00"] == 0:
-        return None
-    cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
-    x, y, w, h = cv2.boundingRect(largest)
-    return (x, y, w, h, cx, cy, w / h if h > 0 else 1.0)
 
 
 def directive(mode, verb, t, rec_dur):
@@ -131,14 +111,14 @@ def pace(loop_start):
 
 
 def intermission(cap, win, next_label):
-    fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=False)
+    fgbg = make_bg()
     t0 = time.time()
     while time.time() - t0 < INTERMISSION:
         ls = time.time()
         ret, frame = cap.read()
         if not ret:
             continue
-        det = detect(cv2.resize(frame, (OUT_W, OUT_H)), fgbg)
+        det = detect_blob(cv2.resize(frame, (OUT_W, OUT_H)), fgbg)
         if show(win, frame, "NEXT: " + next_label, "step OUT of frame",
                 (255, 200, 0), INTERMISSION - (ls - t0), det) == ord("q"):
             return False
@@ -148,7 +128,7 @@ def intermission(cap, win, next_label):
 
 def record_take(cap, win, out_path, mode, verb):
     writer, real_path = open_writer(out_path)
-    fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=False)
+    fgbg = make_bg()
     rec_dur = REC_MOVE if mode == "move" else REC_ACTION
     t0 = time.time()
     n = 0
@@ -162,28 +142,28 @@ def record_take(cap, win, out_path, mode, verb):
         small = cv2.resize(frame, (OUT_W, OUT_H))
         writer.write(small)                 # raw, no overlay
         n += 1
-        det = detect(small, fgbg)
+        det = detect_blob(small, fgbg)
         big, sub, color = directive(mode, verb, t, rec_dur)
         if show(win, frame, big, sub, color, rec_dur - t, det) == ord("q"):
             aborted = True
             break
         pace(ls)
     writer.release()
-    print(f"[record] wrote {real_path} ({n} frames)")
+    print(f"[record] wrote {real_path} ({n} frames, {OUT_W}x{OUT_H})")
     return not aborted
 
 
 def main(takes):
     cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, OUT_W)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, OUT_H)
     if not cap.isOpened():
         print("could not open camera"); return
     win = "Constant recorder"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-    print(f"[record] batch of {len(takes)} takes — watch the touchscreen")
+    print(f"[record] {len(takes)} takes @ {OUT_W}x{OUT_H} — watch the touchscreen")
     try:
         for idx, (fname, mode, verb) in enumerate(takes):
             label = verb if verb else "WALK / MOVE"
@@ -200,15 +180,17 @@ def main(takes):
 
 
 if __name__ == "__main__":
-    # Usage:
-    #   record_clip.py                -> batch, run 1  (walk1.mp4, sit1.mp4, ...)
-    #   record_clip.py 2              -> batch, run 2  (walk2.mp4, sit2.mp4, ...)
-    #   record_clip.py fall1.mp4 fall -> single take
     args = sys.argv[1:]
-    if len(args) >= 2 and not args[0].isdigit():
-        verb = None if args[1] == "walk" else args[1].upper()
-        mode = "move" if args[1] == "walk" else "action"
+    # single take: <out.mp4> <verb>
+    if args and (args[0].endswith(".mp4") or args[0].endswith(".avi")):
+        verb = None if (len(args) > 1 and args[1] == "walk") else (args[1].upper() if len(args) > 1 else "FALL")
+        mode = "move" if (len(args) > 1 and args[1] == "walk") else "action"
         main([(args[0], mode, verb)])
     else:
-        run = args[0] if args and args[0].isdigit() else "1"
+        run = "1"
+        for a in args:
+            if a.isdigit():
+                run = a
+            elif a in RESOLUTIONS:
+                OUT_W, OUT_H = RESOLUTIONS[a]
         main(takes_for_run(run))

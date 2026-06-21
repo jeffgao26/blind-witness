@@ -1,55 +1,46 @@
-"""Offline fall-detection tuner — run the REAL pipeline over a recorded clip.
+"""Offline fall-detection tuner — run the real estimator over a recorded clip.
 
-Uses the production perception (device.perception.detections) and the production
-estimator (device.kalman.KalmanFilter) directly, so it never drifts from whatever
-the perception code currently does. Deterministic (dt from clip FPS, no wall clock)
-so it's repeatable: record a clip once, re-run while we tune thresholds.
-
-IMPORTANT: thresholds are in PIXELS, so clips MUST be recorded at the production
-resolution (currently 320x240) or the numbers won't transfer. The analyzer warns
-if the clip resolution doesn't match.
+Uses tools/blob.py (resolution-scaled detection) + device.kalman.KalmanFilter.
+Deterministic (dt from clip FPS, no wall clock) so it's repeatable. Works at any
+clip resolution — area thresholds scale with frame size — so you can compare a
+320x240 collection against a 640x480 one fairly.
 
 Prints the per-frame signal trace and a summary: peak downward vy and the aspect at
 that moment (the two numbers that set VY_FALL_THRESHOLD / ASPECT_FALL_THRESHOLD),
-plus whether the current thresholds would fire FALL_SUSPECTED on this clip.
+plus whether the current thresholds would fire FALL_SUSPECTED.
 
-Usage (on the Pi, where the clips are):
-    cd ~/blind-witness && python3 tools/analyze_clip.py fall1.mp4
-    python3 tools/analyze_clip.py fall1.mp4 sit1.mp4 walk1.mp4
+Usage (on the Pi):
+    cd ~/blind-witness && python3 tools/analyze_clip.py fall1.mp4 sit1.mp4 ...
 """
 import os
 import sys
 
 import cv2
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))   # repo root (device.*)
+sys.path.insert(0, HERE)                     # tools/ (blob)
 from device.kalman import KalmanFilter, LOW_COV, HIGH_COV
-from device.perception import detections
 from device.state_machine import (
     VY_FALL_THRESHOLD, ASPECT_FALL_THRESHOLD,
     FALL_CONFIRM_SECONDS, SPEED_STILL_THRESHOLD,
 )
-
-PROD_RES = (320, 240)  # keep in sync with device/perception.py cap settings
+from blob import make_bg, detect_blob
 
 
 def analyze(path: str):
-    probe = cv2.VideoCapture(path)
-    if not probe.isOpened():
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
         print(f"could not open {path}\n")
         return
-    fps = probe.get(cv2.CAP_PROP_FPS) or 10.0
-    w = int(probe.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(probe.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    probe.release()
-
+    fps = cap.get(cv2.CAP_PROP_FPS) or 10.0
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     dt = 1.0 / fps
     confirm_frames = int(FALL_CONFIRM_SECONDS * fps)
+    fgbg = make_bg()
 
     print(f"clip={path}  {w}x{h} @ {fps:.1f}fps  confirm_frames={confirm_frames}")
-    if (w, h) != PROD_RES:
-        print(f"  !! WARNING: not production res {PROD_RES[0]}x{PROD_RES[1]} — pixel "
-              f"thresholds (vy/aspect/area) won't transfer. Re-record at {PROD_RES[0]}x{PROD_RES[1]}.")
     print(f"thresholds: VY>{VY_FALL_THRESHOLD} px/s  ASPECT>{ASPECT_FALL_THRESHOLD}  "
           f"STILL<{SPEED_STILL_THRESHOLD} px/s  CONFIRM={FALL_CONFIRM_SECONDS}s")
     print(f"{'t(s)':>6} {'det':>3} {'vy':>8} {'speed':>7} {'aspect':>6} {'cov':>8}  notes")
@@ -63,20 +54,26 @@ def analyze(path: str):
     still_streak = 0
     fired_at = None
 
-    for det in detections(path):   # the REAL perception, over the file
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        det = detect_blob(frame, fgbg)
         has_det = det is not None
         if has_det:
+            cx, cy, aspect = det[4], det[5], det[6]
             if kf is None:
-                kf = KalmanFilter(det.cx, det.cy)
+                kf = KalmanFilter(cx, cy)
             kf.predict(dt)
-            kf.update(det.cx, det.cy)
-        elif kf is not None:
-            kf.predict(dt)
+            kf.update(cx, cy)
+        else:
+            aspect = None
+            if kf is not None:
+                kf.predict(dt)
 
         vy = kf.vy if kf else 0.0
         speed = kf.speed if kf else 0.0
         cov = kf.covariance_trace if kf else 0.0
-        aspect = det.aspect_ratio if has_det else None
 
         if vy > peak_vy:
             peak_vy, aspect_at_peak = vy, (aspect or 0.0)
@@ -102,12 +99,11 @@ def analyze(path: str):
                   f"{(aspect or 0):6.2f} {cov:8.1f}  {notes}")
         i += 1
 
+    cap.release()
     print("\n--- SUMMARY ---")
     print(f"peak downward vy = {peak_vy:.1f} px/s   (aspect at that moment = {aspect_at_peak:.2f})")
     print(f"max aspect ratio = {max_aspect:.2f}")
-    print(f"FALL_SUSPECTED fired: {'YES at t=%.2fs' % (fired_at / fps) if fired_at is not None else 'no'}")
-    print("Tuning: set VY_FALL_THRESHOLD below a real fall's peak vy but above a sit-down's;")
-    print("same idea for ASPECT_FALL_THRESHOLD (standing < 1.0, lying flat > ~1.5).\n")
+    print(f"FALL_SUSPECTED fired: {'YES at t=%.2fs' % (fired_at / fps) if fired_at is not None else 'no'}\n")
 
 
 if __name__ == "__main__":
