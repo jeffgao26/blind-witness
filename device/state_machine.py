@@ -61,6 +61,7 @@ class StateMachine:
 
         # Presence / absence / fall tracking
         self._last_detection_at: float | None = None
+        self._last_cy: float | None = None     # last cy while actually detected
         self._still_since: float | None = None
         self._down_since: float | None = None
         self._started_at = now
@@ -107,14 +108,18 @@ class StateMachine:
     def _derive_state(self, kf, detection, now: float) -> str:
         if detection is not None:
             self._last_detection_at = now
+            self._last_cy = kf.position[1]      # remember where we last actually saw them
 
-        still = kf.speed < SPEED_STILL_THRESHOLD
+        # "Still" includes the detection dropping out: a motionless body gets absorbed
+        # into the MOG2 background, so losing the detection is itself a stillness cue.
+        # (If we required kf.speed, a person who fell and went still would never qualify
+        # — the filter coasts at the fall velocity with no updates to correct it.)
+        still = (detection is None) or (kf.speed < SPEED_STILL_THRESHOLD)
 
-        # --- Fall = centroid in the floor zone AND still, sustained. ---
-        # Uses the Kalman position (not the raw detection), so a person who fell and
-        # lay motionless still reads as "down" even after MOG2 absorbs them and the
-        # detection drops out. This is what makes FALL_SUSPECTED robust.
-        on_floor = kf.position[1] >= self.floor_y
+        # --- Fall = last seen low in the frame (floor zone) AND still, sustained. ---
+        # Floor test uses the last DETECTED position, not the coasting estimate, so it
+        # reflects where they actually went down and survives the MOG2 dropout.
+        on_floor = self._last_cy is not None and self._last_cy >= self.floor_y
         if on_floor and still:
             if self._down_since is None:
                 self._down_since = now
