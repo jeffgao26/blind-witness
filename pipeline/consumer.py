@@ -11,6 +11,7 @@ import time
 import redis
 from contracts.events import STREAM, StateEvent
 from pipeline.store import init_db, insert_event
+from pipeline.alerting import process_event
 
 REDIS_HOST    = "localhost"
 REDIS_PORT    = 6379
@@ -51,6 +52,9 @@ def run(db_path: str = "pipeline/constant.db") -> None:
                     try:
                         event = StateEvent.from_redis(fields)
                         insert_event(event, db_path)
+                        alert = process_event(event, db_path)
+                        if alert:
+                            print(f"[alert] {alert['severity'].upper()} — {alert['family_note']}")
                         r.xack(STREAM, GROUP, msg_id)
                     except Exception as e:
                         print(f"Failed to process {msg_id}: {e}")

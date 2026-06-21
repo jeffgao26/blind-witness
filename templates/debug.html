@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Constant — Debug</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+      background: #0a0a0a;
+      color: #c8c8c8;
+      padding: 28px 24px;
+      max-width: 860px;
+      margin: 0 auto;
+    }
+
+    h1 { font-size: 1rem; color: #555; margin-bottom: 24px; letter-spacing: 0.06em; }
+
+    .section { margin-bottom: 32px; }
+
+    .label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #444;
+      margin-bottom: 8px;
+    }
+
+    .value-row {
+      display: flex;
+      gap: 32px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+
+    .kv { display: flex; flex-direction: column; gap: 3px; }
+    .kv .k { font-size: 0.72rem; color: #555; }
+    .kv .v { font-size: 1.1rem; color: #e0e0e0; }
+
+    #sparkline-container {
+      background: #111;
+      border: 1px solid #1e1e1e;
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    canvas#sparkline {
+      width: 100%;
+      height: 80px;
+      display: block;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+
+    th {
+      text-align: left;
+      color: #444;
+      font-weight: normal;
+      padding: 4px 8px;
+      border-bottom: 1px solid #1e1e1e;
+    }
+
+    td {
+      padding: 5px 8px;
+      border-bottom: 1px solid #161616;
+      color: #bbb;
+    }
+
+    tr:last-child td { border-bottom: none; }
+
+    .state-FALL_SUSPECTED { color: #ff3b3b; }
+    .state-PRESENT_STILL  { color: #ffd60a; }
+    .state-PRESENT_NORMAL { color: #30d158; }
+    .state-ABSENT         { color: #888; }
+    .state-UNCERTAIN      { color: #af8bff; }
+
+    a { color: #444; font-size: 0.8rem; text-decoration: none; }
+    a:hover { color: #888; }
+    #back { margin-bottom: 18px; display: block; }
+  </style>
+</head>
+<body>
+  <a href="/" id="back">← Family view</a>
+  <h1>CONSTANT / DEBUG</h1>
+
+  <div class="section">
+    <div class="label">Current state</div>
+    <div class="value-row">
+      <div class="kv"><span class="k">State</span><span class="v" id="d-state">—</span></div>
+      <div class="kv"><span class="k">Zone</span><span class="v" id="d-zone">—</span></div>
+      <div class="kv"><span class="k">Duration</span><span class="v" id="d-dur">—</span></div>
+      <div class="kv"><span class="k">Cov trace</span><span class="v" id="d-cov">—</span></div>
+      <div class="kv"><span class="k">Last update</span><span class="v" id="d-ts">—</span></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="label">Covariance trace (last 60 events)</div>
+    <div id="sparkline-container">
+      <canvas id="sparkline" width="800" height="80"></canvas>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="label">Recent events</div>
+    <table>
+      <thead>
+        <tr><th>Time</th><th>State</th><th>Duration (s)</th><th>Cov trace</th><th>Zone</th></tr>
+      </thead>
+      <tbody id="events-tbody"></tbody>
+    </table>
+  </div>
+
+  <script src="/static/debug.js"></script>
+</body>
+</html>
