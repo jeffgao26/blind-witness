@@ -55,6 +55,11 @@ def run(db_path: str = "pipeline/constant.db") -> None:
                         alert = process_event(event, db_path)
                         if alert:
                             print(f"[alert] {alert['severity'].upper()} — {alert['family_note']}")
+                            # Hand off to the emergency supervisor (consent + camera handoff)
+                            # only for critical, time-sensitive situations.
+                            if alert.get("trigger_consent_video"):
+                                r.publish("eldercare:consent_video", "1")
+                                print("[alert] -> consent-video trigger published")
                         r.xack(STREAM, GROUP, msg_id)
                     except Exception as e:
                         print(f"Failed to process {msg_id}: {e}")

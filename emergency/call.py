@@ -37,17 +37,21 @@ CORS = {"Access-Control-Allow-Origin": "*",
 _latest = {"frame": None}
 _lock = threading.Lock()
 _pcs = set()
+_stop = threading.Event()
 
 
 def _grab_loop():
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, H)
-    while True:
+    while not _stop.is_set():
         ok, frame = cap.read()
         if ok:
             with _lock:
                 _latest["frame"] = frame   # in memory only; never written to disk
+    cap.release()                          # free the camera so monitoring can reacquire
+    with _lock:
+        _latest["frame"] = None
 
 
 class CameraTrack(VideoStreamTrack):
@@ -151,17 +155,43 @@ async def on_shutdown(app):
     _pcs.clear()
 
 
-def main():
-    threading.Thread(target=_grab_loop, daemon=True).start()
-    time.sleep(1.0)  # let the camera warm up
+def _build_app():
     app = web.Application()
     app.router.add_get("/emergency", mjpeg)
     app.router.add_post("/call/offer", offer)
     app.router.add_options("/call/offer", cors_preflight)
     app.on_shutdown.append(on_shutdown)
-    print(f"[call] emergency media server on :{PORT}  (/emergency mjpeg, /call/offer webrtc)")
-    web.run_app(app, host="0.0.0.0", port=PORT, print=None)
+    return app
+
+
+async def _serve_for(app, seconds):
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    await asyncio.sleep(seconds)
+    await runner.cleanup()
+
+
+def run_server(seconds=None):
+    """Serve the emergency media. seconds=None runs forever (standalone);
+    a number runs a bounded session then releases the camera (used by the handoff)."""
+    _stop.clear()
+    grab = threading.Thread(target=_grab_loop, daemon=True)
+    grab.start()
+    time.sleep(1.0)  # let the camera warm up
+    app = _build_app()
+    print(f"[call] emergency media server on :{PORT}  (/emergency mjpeg, /call/offer webrtc)"
+          + (f" for {seconds:.0f}s" if seconds else ""))
+    try:
+        if seconds is None:
+            web.run_app(app, host="0.0.0.0", port=PORT, print=None)
+        else:
+            asyncio.run(_serve_for(app, seconds))
+    finally:
+        _stop.set()
+        grab.join(timeout=3)   # wait for the camera to actually be released
 
 
 if __name__ == "__main__":
-    main()
+    run_server()

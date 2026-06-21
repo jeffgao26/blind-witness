@@ -64,10 +64,13 @@ def wait_for_refusal(seconds: float, r) -> bool:
                 return True
         except Exception:
             pass
-        # non-blocking stdin check (Enter = refuse), works in a terminal/SSH session
-        if select.select([sys.stdin], [], [], 0.2)[0]:
+        # non-blocking stdin check (Enter = refuse) — only when interactive, else a
+        # headless process (stdin=/dev/null) would read instant EOF and false-refuse.
+        if sys.stdin.isatty() and select.select([sys.stdin], [], [], 0.2)[0]:
             sys.stdin.readline()
             return True
+        if not sys.stdin.isatty():
+            time.sleep(0.2)
     return False
 
 
