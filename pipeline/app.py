@@ -15,10 +15,11 @@ from flask import Flask, render_template, jsonify, abort, send_file, request
 from pipeline.store import init_db, get_latest_event, get_recent_events, get_active_alert, get_alerts
 
 DB_PATH = os.environ.get("CONSTANT_DB", "pipeline/constant.db")
-# Where the Pi serves the consent-gated emergency media (live MJPEG + WebRTC signaling).
-# The family browser connects here DIRECTLY (peer-to-peer on the LAN) — video never
-# proxies through this server. Override per deployment.
-PI_MEDIA_URL = os.environ.get("CONSTANT_PI_URL", "http://192.168.4.35:8090")
+# Where the family browser fetches the consent-gated one-way live view (MJPEG).
+# Default assumes you tunnel the Pi's :8090 to localhost (ssh -L 8090:localhost:8090),
+# which avoids granting the browser LAN access. Override with the Pi's LAN IP if you
+# view the page directly on the network.
+PI_MEDIA_URL = os.environ.get("CONSTANT_PI_URL", "http://localhost:8090")
 
 app = Flask(__name__, template_folder="../templates", static_folder="../static")
 

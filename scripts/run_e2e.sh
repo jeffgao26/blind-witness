@@ -12,9 +12,9 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p logs
 
-# Use the aiortc venv (sees system cv2/redis/flask via --system-site-packages) so the
-# supervisor can run WebRTC; fall back to system python if it's missing.
-PY="$HOME/rtcenv/bin/python"; [ -x "$PY" ] || PY=python3
+# One-way live view uses only stdlib MJPEG + cv2/redis/flask (all system), so plain
+# python3 is enough — no aiortc venv needed. (The v2 WebRTC call would need ~/rtcenv.)
+PY=python3
 export CONSTANT_AUDIO_DEV="${CONSTANT_AUDIO_DEV:-plughw:1,0}"   # touchscreen speaker
 
 start_one() { # name, module

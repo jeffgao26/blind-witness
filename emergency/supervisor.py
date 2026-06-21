@@ -17,8 +17,9 @@ import time
 
 import redis
 
-from emergency.consent_video import speak, wait_for_refusal, CONSENT_WINDOW
-from emergency import call
+from emergency.consent_video import speak, wait_for_refusal, serve_live_view, CONSENT_WINDOW
+# NOTE: one-way live view only (stdlib MJPEG, no aiortc). The two-way WebRTC call lives
+# in emergency/call.py as a documented v2; swap serve_live_view -> call.run_server to use it.
 
 YIELD_KEY = "eldercare:camera_yield"
 RELEASED_KEY = "eldercare:camera_released"
@@ -48,7 +49,7 @@ def run_session(r) -> None:
     if not _wait_camera_free(r):
         print("[supervisor] WARNING: monitoring didn't confirm release; proceeding anyway.")
     try:
-        call.run_server(seconds=STREAM_SECONDS)   # owns the camera for the session
+        serve_live_view(STREAM_SECONDS)   # owns the camera, one-way MJPEG, then releases
     finally:
         r.delete(YIELD_KEY)
         r.delete(RELEASED_KEY)
