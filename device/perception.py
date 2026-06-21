@@ -64,18 +64,19 @@ def detections(source: int | str = 0):
                 yield None
                 continue
 
-            # Merge all valid contours into one bounding box — handles person split into blobs
-            bboxes = [cv2.boundingRect(c) for c in valid]
-            x = min(b[0] for b in bboxes)
-            y = min(b[1] for b in bboxes)
-            x2 = max(b[0] + b[2] for b in bboxes)
-            y2 = max(b[1] + b[3] for b in bboxes)
-            w = x2 - x
-            h = y2 - y
-
-            cx = x + w / 2
-            cy = y + h / 2
-            area = sum(cv2.contourArea(c) for c in valid)
+            # Single largest blob. The dilate above already fuses a person split into
+            # nearby blobs at the mask level, so we don't merge scattered contours into
+            # one box — that produced a meaningless centroid/aspect when stray blobs
+            # were far apart. Centroid from image moments; aspect from its bounding box.
+            largest = max(valid, key=cv2.contourArea)
+            area = cv2.contourArea(largest)
+            M = cv2.moments(largest)
+            if M["m00"] == 0:
+                yield None
+                continue
+            cx = M["m10"] / M["m00"]
+            cy = M["m01"] / M["m00"]
+            _, _, w, h = cv2.boundingRect(largest)
             aspect_ratio = w / h if h > 0 else 1.0
 
             yield Detection(cx=cx, cy=cy, area=area, aspect_ratio=aspect_ratio, timestamp=time.time())
