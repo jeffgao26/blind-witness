@@ -7,10 +7,20 @@ STILL_SECONDS         = 3.0    # held still + present this long → PRESENT_STIL
 ABSENCE_THRESHOLD     = 4.0    # no detection this long → ABSENT (else UNCERTAIN buffer)
 DEBOUNCE_SECONDS      = 0.4    # a new state must persist this long before we commit/emit
 
-# Fall detection
-VY_FALL_THRESHOLD     = 150.0  # px/s downward velocity spike → fall candidate
-ASPECT_FALL_THRESHOLD = 1.2    # bbox width/height — above this = wide/flat = fallen
-FALL_CONFIRM_SECONDS  = 3.0    # must stay still after the spike to confirm FALL_SUSPECTED
+# Fall detection — POSITION + STILLNESS, not velocity/aspect.
+# Validated on 3 locked-camera collections (runs 4-6, 3 rooms): a fallen person's
+# tracked centroid ends in the lower part of the frame (cy/H >= ~0.66) and stays
+# still, while walking (<=0.52) and sitting in a chair (<=0.59) end higher. Velocity
+# and bbox aspect did NOT separate (see tools/RESULTS.md). We use the Kalman position,
+# which holds the last estimate through MOG2 dropout when a still body is absorbed
+# into the background — so "fell and lay motionless" stays detectable.
+# FLOOR_FRAC is camera-dependent: calibrate the floor zone per install.
+FRAME_H               = 240    # production capture height (px); cy is normalized by this
+FLOOR_FRAC            = 0.63   # centroid below this fraction of the frame = "on the floor"
+FALL_CONFIRM_SECONDS  = 2.0    # must stay down+still this long to confirm FALL_SUSPECTED
+
+# Kept for the contract / future use (aspect ratio still travels on Detection).
+ASPECT_FALL_THRESHOLD = 1.2
 
 # Sampling rates (seconds between heartbeat emits) — the cadence is uncertainty-driven.
 HEARTBEAT_STABLE    = 30.0
@@ -28,12 +38,16 @@ class StateMachine:
     add new states and thresholds here without modifying fall detection logic.
     """
 
-    def __init__(self, emit_fn, source: Source = "live"):
+    def __init__(self, emit_fn, source: Source = "live",
+                 frame_h: int = FRAME_H, floor_frac: float = FLOOR_FRAC):
         """
         emit_fn: callable that accepts a StateEvent — decouples transport (Redis, SQLite, stdout)
+        frame_h / floor_frac: floor-zone calibration (centroid below floor_frac*frame_h
+            of the frame, while still, reads as on-the-floor). Tune per camera install.
         """
         self.emit_fn = emit_fn
         self.source = source
+        self.floor_y = floor_frac * frame_h
 
         now = time.time()
         self.state = "UNCERTAIN"
@@ -48,17 +62,19 @@ class StateMachine:
         # Presence / absence / fall tracking
         self._last_detection_at: float | None = None
         self._still_since: float | None = None
-        self._fall_candidate_at: float | None = None
+        self._down_since: float | None = None
         self._started_at = now
 
     # ------------------------------------------------------------------
-    def update(self, kf, detection):
+    def update(self, kf, detection, now: float | None = None):
         """
         Call every frame.
         kf: KalmanFilter instance (post predict+update)
         detection: Detection | None
+        now: override the clock (for deterministic offline replay/testing)
         """
-        now = time.time()
+        if now is None:
+            now = time.time()
         raw = self._derive_state(kf, detection, now)
 
         # --- debounce: only commit a transition once the new state has held ---
@@ -89,32 +105,36 @@ class StateMachine:
 
     # ------------------------------------------------------------------
     def _derive_state(self, kf, detection, now: float) -> str:
+        if detection is not None:
+            self._last_detection_at = now
+
+        still = kf.speed < SPEED_STILL_THRESHOLD
+
+        # --- Fall = centroid in the floor zone AND still, sustained. ---
+        # Uses the Kalman position (not the raw detection), so a person who fell and
+        # lay motionless still reads as "down" even after MOG2 absorbs them and the
+        # detection drops out. This is what makes FALL_SUSPECTED robust.
+        on_floor = kf.position[1] >= self.floor_y
+        if on_floor and still:
+            if self._down_since is None:
+                self._down_since = now
+            if (now - self._down_since) >= FALL_CONFIRM_SECONDS:
+                return "FALL_SUSPECTED"
+            return "UNCERTAIN"      # down but not yet confirmed
+        else:
+            self._down_since = None
+
         if detection is None:
             self._still_since = None
-            self._fall_candidate_at = None
             absent_for = (now - self._last_detection_at
                           if self._last_detection_at is not None
                           else now - self._started_at)
-            # Prolonged absence is a committed ABSENT; the gap before that is the
-            # UNCERTAIN buffer, during which the covariance is visibly climbing.
+            # Prolonged absence is a committed ABSENT; the gap before is the UNCERTAIN
+            # buffer, during which the covariance is visibly climbing.
             return "ABSENT" if absent_for >= ABSENCE_THRESHOLD else "UNCERTAIN"
 
-        # Detection present.
-        self._last_detection_at = now
-
-        # Fall detection — downward velocity spike + wide/flat bbox, then held still.
-        if kf.vy > VY_FALL_THRESHOLD and detection.aspect_ratio > ASPECT_FALL_THRESHOLD:
-            if self._fall_candidate_at is None:
-                self._fall_candidate_at = now
-        if self._fall_candidate_at is not None:
-            still = kf.speed < SPEED_STILL_THRESHOLD
-            held = (now - self._fall_candidate_at) >= FALL_CONFIRM_SECONDS
-            if still and held:
-                return "FALL_SUSPECTED"
-            return "UNCERTAIN"
-
-        # Present + low motion sustained → PRESENT_STILL; otherwise normal presence.
-        if kf.speed < SPEED_STILL_THRESHOLD:
+        # Present, upright (not on floor). Sustained low motion → PRESENT_STILL.
+        if still:
             if self._still_since is None:
                 self._still_since = now
             if (now - self._still_since) >= STILL_SECONDS:

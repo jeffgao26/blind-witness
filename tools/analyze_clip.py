@@ -1,16 +1,14 @@
-"""Offline fall-detection tuner — run the real estimator over a recorded clip.
+"""Offline state-machine replay — run the REAL device pipeline over a recorded clip.
 
-Uses tools/blob.py (resolution-scaled detection) + device.kalman.KalmanFilter.
-Deterministic (dt from clip FPS, no wall clock) so it's repeatable. Works at any
-clip resolution — area thresholds scale with frame size — so you can compare a
-320x240 collection against a 640x480 one fairly.
+Drives blob.detect_blob -> KalmanFilter -> the actual StateMachine (with an injected
+clock so wall-clock thresholds replay deterministically) and reports the state timeline
+plus whether FALL_SUSPECTED fired. This tests the production logic, not a mirror of it.
 
-Prints the per-frame signal trace and a summary: peak downward vy and the aspect at
-that moment (the two numbers that set VY_FALL_THRESHOLD / ASPECT_FALL_THRESHOLD),
-plus whether the current thresholds would fire FALL_SUSPECTED.
+Works at any clip resolution (blob scales area; StateMachine floor zone is set from the
+clip height).
 
 Usage (on the Pi):
-    cd ~/blind-witness && python3 tools/analyze_clip.py fall1.mp4 sit1.mp4 ...
+    cd ~/blind-witness && python3 tools/analyze_clip.py fall_side4.mp4 sit4.mp4 ...
 """
 import os
 import sys
@@ -18,13 +16,10 @@ import sys
 import cv2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(HERE))   # repo root (device.*)
-sys.path.insert(0, HERE)                     # tools/ (blob)
-from device.kalman import KalmanFilter, LOW_COV, HIGH_COV
-from device.state_machine import (
-    VY_FALL_THRESHOLD, ASPECT_FALL_THRESHOLD,
-    FALL_CONFIRM_SECONDS, SPEED_STILL_THRESHOLD,
-)
+sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, HERE)
+from device.kalman import KalmanFilter
+from device.state_machine import StateMachine
 from blob import make_bg, detect_blob
 
 
@@ -34,76 +29,42 @@ def analyze(path: str):
         print(f"could not open {path}\n")
         return
     fps = cap.get(cv2.CAP_PROP_FPS) or 10.0
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 240
     dt = 1.0 / fps
-    confirm_frames = int(FALL_CONFIRM_SECONDS * fps)
     fgbg = make_bg()
 
-    print(f"clip={path}  {w}x{h} @ {fps:.1f}fps  confirm_frames={confirm_frames}")
-    print(f"thresholds: VY>{VY_FALL_THRESHOLD} px/s  ASPECT>{ASPECT_FALL_THRESHOLD}  "
-          f"STILL<{SPEED_STILL_THRESHOLD} px/s  CONFIRM={FALL_CONFIRM_SECONDS}s")
-    print(f"{'t(s)':>6} {'det':>3} {'vy':>8} {'speed':>7} {'aspect':>6} {'cov':>8}  notes")
-
+    events = []   # (t, state)
+    sm = StateMachine(emit_fn=lambda e: events.append((e.timestamp, e.state)), frame_h=H)
     kf = None
     i = 0
-    peak_vy = 0.0
-    aspect_at_peak = 0.0
-    max_aspect = 0.0
-    candidate_idx = None
-    still_streak = 0
-    fired_at = None
-
     while True:
         ret, frame = cap.read()
         if not ret:
             break
         det = detect_blob(frame, fgbg)
-        has_det = det is not None
-        if has_det:
-            cx, cy, aspect = det[4], det[5], det[6]
+        now = i * dt
+        if det is not None:
+            cx, cy = det[4], det[5]
             if kf is None:
                 kf = KalmanFilter(cx, cy)
             kf.predict(dt)
             kf.update(cx, cy)
-        else:
-            aspect = None
-            if kf is not None:
-                kf.predict(dt)
-
-        vy = kf.vy if kf else 0.0
-        speed = kf.speed if kf else 0.0
-        cov = kf.covariance_trace if kf else 0.0
-
-        if vy > peak_vy:
-            peak_vy, aspect_at_peak = vy, (aspect or 0.0)
-        if aspect and aspect > max_aspect:
-            max_aspect = aspect
-
-        notes = ""
-        if has_det and vy > VY_FALL_THRESHOLD and (aspect or 0) > ASPECT_FALL_THRESHOLD:
-            if candidate_idx is None:
-                candidate_idx = i
-                notes = "FALL CANDIDATE armed"
-        if candidate_idx is not None and has_det:
-            still_streak = still_streak + 1 if speed < SPEED_STILL_THRESHOLD else 0
-            if still_streak >= confirm_frames and fired_at is None:
-                fired_at = i
-                notes = ">>> FALL_SUSPECTED would fire"
-        if not has_det:
-            candidate_idx = None
-            still_streak = 0
-
-        if i % max(1, int(fps // 5)) == 0 or notes:
-            print(f"{i/fps:6.2f} {('Y' if has_det else '-'):>3} {vy:8.1f} {speed:7.1f} "
-                  f"{(aspect or 0):6.2f} {cov:8.1f}  {notes}")
+        elif kf is not None:
+            kf.predict(dt)
+        if kf is not None:
+            sm.update(kf, det, now=now)
         i += 1
-
     cap.release()
-    print("\n--- SUMMARY ---")
-    print(f"peak downward vy = {peak_vy:.1f} px/s   (aspect at that moment = {aspect_at_peak:.2f})")
-    print(f"max aspect ratio = {max_aspect:.2f}")
-    print(f"FALL_SUSPECTED fired: {'YES at t=%.2fs' % (fired_at / fps) if fired_at is not None else 'no'}\n")
+
+    # collapse consecutive duplicate states into a timeline
+    timeline = []
+    for t, s in events:
+        if not timeline or timeline[-1][1] != s:
+            timeline.append((t, s))
+    fired = next((t for t, s in events if s == "FALL_SUSPECTED"), None)
+    seq = " -> ".join(f"{s}@{t:.1f}s" for t, s in timeline)
+    verdict = f"FALL_SUSPECTED @ {fired:.1f}s" if fired is not None else "no fall"
+    print(f"{os.path.basename(path):>18} | {verdict:>22} | {seq}")
 
 
 if __name__ == "__main__":

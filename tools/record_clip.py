@@ -185,7 +185,7 @@ def record_take(cap, win, out_path, mode, verb):
             break
         pace(ls)
     writer.release()
-    print(f"[record] wrote {real_path} ({n} frames, {OUT_W}x{OUT_H})")
+    print(f"[record] wrote {real_path} ({n} frames, {OUT_W}x{OUT_H}, ~{n/rec_dur:.0f}fps actual)")
     return not aborted
 
 
@@ -193,6 +193,7 @@ def main(takes):
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, OUT_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, OUT_H)
+    cap.set(cv2.CAP_PROP_FPS, FPS)
     if not cap.isOpened():
         print("could not open camera"); return
     for _ in range(15):     # let auto-exposure/WB settle on the current room...
@@ -232,4 +233,6 @@ if __name__ == "__main__":
                 run = a
             elif a in RESOLUTIONS:
                 OUT_W, OUT_H = RESOLUTIONS[a]
+            elif a.endswith("fps") and a[:-3].isdigit():
+                FPS = int(a[:-3])          # e.g. "30fps" -> capture/record at 30fps
         main(takes_for_run(run))

@@ -81,6 +81,28 @@ converge: "dropped low and went still unexpectedly → ask → escalate."
 Caveat: n=1 per class. Need 2 more locked collections to set the cy_end/stillness
 threshold and check the fall-vs-crouch/couch boundary.
 
+## Round 4 (descent rate, 30fps) — run 7
+
+Hypothesis: a fall drops FASTER than lying down. Measured sustained descent rate
+(drop / 0.25s window, median-filtered) via `tools/descent.py`.
+
+- 10fps baseline (run 4) *looked* promising: falls 1.6–2.2 vs slow lie-downs sit 0.75 /
+  couch 0.94. But that came from 2-frame diffs — a single big centroid jump inflated it.
+- **30fps (run 7) disproved it:** fall_side 0.77 ≈ sit 0.79; crouch 1.73 out-paced every
+  fall; falls (0.77–1.37) fully overlap negatives. Measured properly, falls are NOT
+  meaningfully faster than a brisk crouch/sit.
+
+Pattern across all rounds: vy ✗, aspect ✗, resolution ✗, descent rate ✗ — every
+single-feature signal from the **blob centroid** fails to replicate. Only **position
+(ends low + still)** holds, and only to separate falls from walk/sit (not from lying down).
+
+## Round 5 (next): local pose model (MoveNet)
+Every failed approach used the crude blob. Try MoveNet (tflite-runtime, on-device,
+emits keypoints not pixels → privacy-consistent) offline on the run-7 clips: torso
+orientation (horizontal vs upright) is the signal the bbox couldn't capture. Expected to
+separate sit (upright) from fall (horizontal); will NOT separate fall from deliberate
+lie-down (consent-gate territory regardless).
+
 ## Decision (provisional)
 Trigger on **dropped-low + sustained-stillness** (vertical position + stillness, on a
 LOCKED camera), with the consent gate disambiguating couch/crouch. This subsumes the
