@@ -23,3 +23,6 @@ clips/
 # macOS
 .DS_Store
 **/.DS_Store
+
+# logs
+logs/
