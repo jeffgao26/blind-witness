@@ -2,7 +2,12 @@ import numpy as np
 
 
 # Tunable noise constants
-PROCESS_NOISE = 1e-2   # Q diagonal — how much we trust the motion model
+# PROCESS_NOISE is the acceleration spectral density of the constant-velocity model:
+# how much real motion can deviate from "constant velocity" between frames. It is the
+# knob that makes the covariance a *legible* uncertainty signal — large enough that a
+# few predict-only frames (occlusion / out of frame) visibly grow tr(P), small enough
+# that a tracked target settles well under LOW_COV.
+PROCESS_NOISE = 600.0  # accel spectral density (px/s^2)^2 — tuned on-device
 MEASURE_NOISE = 5.0    # R diagonal — how much we trust the centroid detection
 INIT_COV      = 500.0  # P diagonal — high initial uncertainty
 
@@ -36,9 +41,27 @@ class KalmanFilter:
             [0, 1, 0, 0],
         ], dtype=float)
 
-        self.Q = np.eye(4) * PROCESS_NOISE
         self.R = np.eye(2) * MEASURE_NOISE
         self.P = np.eye(4) * INIT_COV
+
+    # ------------------------------------------------------------------
+    def _Q(self, dt: float) -> np.ndarray:
+        """Discrete white-noise-acceleration process covariance for this dt.
+
+        Unlike a static diagonal, this couples position and velocity and scales with
+        dt, so predict-only steps inflate uncertainty the way they physically should:
+        the longer we go without a detection, the less we know where the person is.
+        """
+        q = PROCESS_NOISE
+        dt2 = dt * dt
+        dt3 = dt2 * dt
+        dt4 = dt2 * dt2
+        return q * np.array([
+            [dt4 / 4, 0.0,     dt3 / 2, 0.0    ],
+            [0.0,     dt4 / 4, 0.0,     dt3 / 2],
+            [dt3 / 2, 0.0,     dt2,     0.0    ],
+            [0.0,     dt3 / 2, 0.0,     dt2    ],
+        ])
 
     # ------------------------------------------------------------------
     def predict(self, dt: float) -> None:
@@ -47,7 +70,7 @@ class KalmanFilter:
         self.F[1, 3] = dt
 
         self.x = self.F @ self.x
-        self.P = self.F @ self.P @ self.F.T + self.Q
+        self.P = self.F @ self.P @ self.F.T + self._Q(dt)
 
     # ------------------------------------------------------------------
     def update(self, cx: float, cy: float) -> None:

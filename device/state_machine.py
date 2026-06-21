@@ -1,22 +1,28 @@
 import time
 from contracts.events import StateEvent, Source, LOW_COV, HIGH_COV, STREAM
 
-# Tunable thresholds
-STILL_SECONDS         = 180.0  # 3 min motionless in frame → PRESENT_STILL
-VY_FALL_THRESHOLD     = 8.0    # px/frame downward velocity spike → fall candidate
-ASPECT_FALL_THRESHOLD = 1.2    # width/height ratio — above this = wide/flat = fallen
-FALL_CONFIRM_SECONDS  = 30.0   # must stay still after spike to confirm FALL_SUSPECTED
-SPEED_STILL_THRESHOLD = 1.5    # px/frame — below this = not moving
+# Tunable thresholds (velocities are px/SECOND — the Kalman state is in px/s).
+SPEED_STILL_THRESHOLD = 25.0   # below this speed, the person is "not really moving"
+STILL_SECONDS         = 3.0    # held still + present this long → PRESENT_STILL
+ABSENCE_THRESHOLD     = 4.0    # no detection this long → ABSENT (else UNCERTAIN buffer)
+DEBOUNCE_SECONDS      = 0.4    # a new state must persist this long before we commit/emit
 
-# Sampling rates (seconds between heartbeat emits)
+# Fall detection
+VY_FALL_THRESHOLD     = 150.0  # px/s downward velocity spike → fall candidate
+ASPECT_FALL_THRESHOLD = 1.2    # bbox width/height — above this = wide/flat = fallen
+FALL_CONFIRM_SECONDS  = 3.0    # must stay still after the spike to confirm FALL_SUSPECTED
+
+# Sampling rates (seconds between heartbeat emits) — the cadence is uncertainty-driven.
 HEARTBEAT_STABLE    = 30.0
-HEARTBEAT_UNCERTAIN = 5.0
+HEARTBEAT_UNCERTAIN = 2.0
 
 
 class StateMachine:
     """
     Derives state from Kalman filter output and Detection.
-    Emits StateEvent on confirmed transitions and heartbeat.
+    Emits StateEvent on confirmed (debounced) transitions and on a heartbeat whose
+    rate is driven by uncertainty: slow when confident, fast when the covariance is
+    high or the state is volatile.
 
     Scalability note: new use cases (night wandering, med reminders) should
     add new states and thresholds here without modifying fall detection logic.
@@ -29,12 +35,21 @@ class StateMachine:
         self.emit_fn = emit_fn
         self.source = source
 
+        now = time.time()
         self.state = "UNCERTAIN"
-        self.state_entered_at = time.time()
+        self.state_entered_at = now
         self.last_emit_at = 0.0
+        self.current_interval = HEARTBEAT_UNCERTAIN  # surfaced on the debug view
 
-        # Fall detection tracking
-        self._fall_candidate_at: float | None = None  # time of vy spike
+        # Debounce: a proposed state must persist DEBOUNCE_SECONDS before we commit it.
+        self._cand_state = "UNCERTAIN"
+        self._cand_since = now
+
+        # Presence / absence / fall tracking
+        self._last_detection_at: float | None = None
+        self._still_since: float | None = None
+        self._fall_candidate_at: float | None = None
+        self._started_at = now
 
     # ------------------------------------------------------------------
     def update(self, kf, detection):
@@ -44,56 +59,84 @@ class StateMachine:
         detection: Detection | None
         """
         now = time.time()
-        new_state = self._derive_state(kf, detection, now)
+        raw = self._derive_state(kf, detection, now)
 
-        if new_state != self.state:
-            self.state = new_state
+        # --- debounce: only commit a transition once the new state has held ---
+        if raw != self._cand_state:
+            self._cand_state = raw
+            self._cand_since = now
+        committed_change = False
+        if raw != self.state and (now - self._cand_since) >= DEBOUNCE_SECONDS:
+            self.state = raw
             self.state_entered_at = now
-            self._emit(now)
-        else:
-            interval = HEARTBEAT_UNCERTAIN if self.state == "UNCERTAIN" else HEARTBEAT_STABLE
-            if now - self.last_emit_at >= interval:
-                self._emit(now)
+            committed_change = True
+
+        # --- uncertainty-driven cadence ---
+        # Slow heartbeat when the situation is settled; fast when we're actively
+        # unsure. UNCERTAIN and a fall candidate are always volatile. A present
+        # person we're losing (covariance climbing past HIGH_COV) goes fast too.
+        # A committed ABSENT is settled — high covariance there is expected, not news.
+        if self.state in ("PRESENT_NORMAL", "PRESENT_STILL"):
+            confident = kf.covariance_trace < HIGH_COV
+        elif self.state == "ABSENT":
+            confident = True
+        else:  # UNCERTAIN, FALL_SUSPECTED
+            confident = False
+        self.current_interval = HEARTBEAT_STABLE if confident else HEARTBEAT_UNCERTAIN
+
+        if committed_change or (now - self.last_emit_at) >= self.current_interval:
+            self._emit(kf, now)
 
     # ------------------------------------------------------------------
     def _derive_state(self, kf, detection, now: float) -> str:
-        duration = now - self.state_entered_at
-
         if detection is None:
+            self._still_since = None
             self._fall_candidate_at = None
-            return "ABSENT" if kf.is_confident else "UNCERTAIN"
+            absent_for = (now - self._last_detection_at
+                          if self._last_detection_at is not None
+                          else now - self._started_at)
+            # Prolonged absence is a committed ABSENT; the gap before that is the
+            # UNCERTAIN buffer, during which the covariance is visibly climbing.
+            return "ABSENT" if absent_for >= ABSENCE_THRESHOLD else "UNCERTAIN"
 
-        # Fall detection — check for vy spike + aspect ratio
+        # Detection present.
+        self._last_detection_at = now
+
+        # Fall detection — downward velocity spike + wide/flat bbox, then held still.
         if kf.vy > VY_FALL_THRESHOLD and detection.aspect_ratio > ASPECT_FALL_THRESHOLD:
             if self._fall_candidate_at is None:
                 self._fall_candidate_at = now
-
-        # Confirm fall if candidate has been held and person is still
         if self._fall_candidate_at is not None:
             still = kf.speed < SPEED_STILL_THRESHOLD
-            held_long_enough = (now - self._fall_candidate_at) >= FALL_CONFIRM_SECONDS
-            if still and held_long_enough:
+            held = (now - self._fall_candidate_at) >= FALL_CONFIRM_SECONDS
+            if still and held:
                 return "FALL_SUSPECTED"
-            # Candidate active but not yet confirmed — stay uncertain
             return "UNCERTAIN"
 
-        # Normal presence states
+        # Present + low motion sustained → PRESENT_STILL; otherwise normal presence.
         if kf.speed < SPEED_STILL_THRESHOLD:
-            if duration >= STILL_SECONDS:
+            if self._still_since is None:
+                self._still_since = now
+            if (now - self._still_since) >= STILL_SECONDS:
                 return "PRESENT_STILL"
-            return "UNCERTAIN"
-
+            return "PRESENT_NORMAL"
+        self._still_since = None
         return "PRESENT_NORMAL"
 
     # ------------------------------------------------------------------
-    def _emit(self, now: float) -> None:
+    def _emit(self, kf, now: float) -> None:
         event = StateEvent(
             timestamp=now,
             state=self.state,
-            covariance_trace=0.0,  # caller should patch this from kf.covariance_trace
+            covariance_trace=kf.covariance_trace,
             duration_in_state=now - self.state_entered_at,
             zone="in_frame" if self.state not in ("ABSENT", "UNCERTAIN") else "out_of_frame",
             source=self.source,
         )
         self.emit_fn(event)
         self.last_emit_at = now
+
+    @property
+    def current_sample_hz(self) -> float:
+        """Effective heartbeat rate — surfaced on the debug view."""
+        return 1.0 / self.current_interval if self.current_interval > 0 else 0.0
