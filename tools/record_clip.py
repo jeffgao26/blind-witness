@@ -15,6 +15,7 @@ Run over SSH so it renders on the touchscreen:
 Press q to abort.
 """
 import os
+import subprocess
 import sys
 import time
 
@@ -53,6 +54,41 @@ BASE_TAKES = [
 
 def takes_for_run(run):
     return [(f"{base}{run}.mp4", mode, verb) for base, mode, verb in BASE_TAKES]
+
+
+def _get_ctrl(dev, name):
+    try:
+        out = subprocess.run(["v4l2-ctl", "-d", dev, f"--get-ctrl={name}"],
+                             capture_output=True, text=True).stdout
+        return int(out.split(":")[1])
+    except Exception:
+        return None
+
+
+def lock_camera(dev="/dev/video0"):
+    """Freeze exposure / white-balance / focus so global lighting shifts stop
+    fooling MOG2 into whole-frame 'motion'. Locks to whatever auto just chose, so
+    brightness stays correct for the room. No-op if v4l2-ctl is missing."""
+    if not subprocess.run(["which", "v4l2-ctl"], capture_output=True).returncode == 0:
+        print("[record] v4l2-ctl missing — auto-exposure NOT locked (sudo apt install v4l-utils)")
+        return
+    exp = _get_ctrl(dev, "exposure_time_absolute") or 333
+    gain = _get_ctrl(dev, "gain") or 128
+    wb = _get_ctrl(dev, "white_balance_temperature") or 4000
+    foc = _get_ctrl(dev, "focus_absolute") or 35
+    ctrls = [
+        "auto_exposure=1",                    # manual
+        f"exposure_time_absolute={exp}",
+        "exposure_dynamic_framerate=0",
+        f"gain={gain}",
+        "white_balance_automatic=0",
+        f"white_balance_temperature={wb}",
+        "focus_automatic_continuous=0",
+        f"focus_absolute={foc}",
+    ]
+    subprocess.run(["v4l2-ctl", "-d", dev, *[f"--set-ctrl={c}" for c in ctrls]],
+                   capture_output=True)
+    print(f"[record] camera LOCKED: exposure={exp} gain={gain} wb={wb} focus={foc}")
 
 
 def open_writer(path):
@@ -159,6 +195,9 @@ def main(takes):
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, OUT_H)
     if not cap.isOpened():
         print("could not open camera"); return
+    for _ in range(15):     # let auto-exposure/WB settle on the current room...
+        cap.read()
+    lock_camera()           # ...then freeze it so MOG2 isn't fooled by lighting drift
     win = "Constant recorder"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)

@@ -14,6 +14,8 @@ from device.perception import MIN_CONTOUR_AREA, MAX_CONTOUR_AREA  # 320x240 refe
 
 REF_AREA = 320 * 240
 REF_MIN_DIM = 240
+MAX_FG_FRAC = 0.55   # if more than this fraction of the frame is foreground, it's a
+                     # global change (lighting / auto-exposure), not a person — reject.
 
 
 def make_bg():
@@ -28,6 +30,9 @@ def detect_blob(frame, fgbg):
     iters = max(1, round(2 * (min(w, h) / REF_MIN_DIM)))  # dilate scales with resolution
 
     mask = fgbg.apply(frame)
+    # Reject whole-frame foreground (lighting/exposure shift) before it pollutes features.
+    if cv2.countNonZero(mask) > MAX_FG_FRAC * w * h:
+        return None
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.dilate(mask, kernel, iterations=iters)

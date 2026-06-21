@@ -52,8 +52,39 @@ Same tooling, area/dilate scaled to resolution via `tools/blob.py` (fair A/B tes
 **Conclusion: the feature (centroid vy + bbox aspect from background subtraction) is the
 limit, not resolution.** 21 clips across two resolutions, zero separation. Matches PRD §11.
 
-## Decision
-Reframe the emergency trigger to **sustained stillness / unexpected prolonged absence**
+## Round 3 (camera LOCKED, 320×240) — run 4
+
+Added richer features (`tools/explore.py`: vertical position `cy`, drop, end-stillness)
+and **locked the camera** (manual exposure/WB/focus via v4l2-ctl in `record_clip.py`) to
+stop lighting/auto-exposure from flagging the whole frame as foreground.
+
+**Detection cleaned up dramatically:** `fg_bad` (whole-frame-reject frames) went from
+~50/29/20 in earlier runs to **1 on every clip**.
+
+| clip | cy_end (0=top,1=floor) | end_still | verdict |
+|---|---|---|---|
+| fall_side4   | 0.79 | 0.10 | low+still |
+| fall_toward4 | 0.83 | 0.06 | low+still |
+| fall_down4   | 0.85 | 0.07 | low+still |
+| walk4 (neg)  | 0.21 | 0.23 | high+moving — rejected |
+| sit4 (neg)   | 0.54 | 0.02 | mid (chair) — rejected |
+| crouch4 (neg)| 0.77 | 0.05 | low+still — FP |
+| couch4 (neg) | 0.79 | 0.10 | low+still — FP |
+
+**Finding:** with clean detection, the discriminator is **vertical position + stillness**,
+NOT velocity or aspect. Rule "ends low (cy_end>0.75) AND still" catches all 3 falls and
+correctly rejects walking and sitting (the common activities). Remaining confusers —
+crouch and lie-on-couch — both genuinely end low+still, and are handled benignly by the
+consent gate (the elder just says "I'm fine"). Fall detection and the stillness reframe
+converge: "dropped low and went still unexpectedly → ask → escalate."
+
+Caveat: n=1 per class. Need 2 more locked collections to set the cy_end/stillness
+threshold and check the fall-vs-crouch/couch boundary.
+
+## Decision (provisional)
+Trigger on **dropped-low + sustained-stillness** (vertical position + stillness, on a
+LOCKED camera), with the consent gate disambiguating couch/crouch. This subsumes the
+earlier "sustained stillness / unexpected absence" reframe —
 (the robust signal already produced by the Kalman covariance + ABSENT logic + pipeline
 baseline), which is the PRD thesis ("deviation from pattern, not diagnosis"). Keep
 "possible fall" only as a low-confidence hint to the pipeline, never the sole escalation
