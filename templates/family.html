@@ -118,6 +118,27 @@
     #ack-btn:hover { background: #ff3b3b22; }
     body.alert-active #ack-btn { display: inline-block; }
 
+    /* Emergency media (live view + two-way call) — only offered during an alert */
+    #media-controls { display: none; margin-top: 16px; gap: 10px; justify-content: center; }
+    body.alert-active #media-controls { display: flex; }
+    .media-btn {
+      padding: 10px 22px; border-radius: 999px; border: 1.5px solid #ff7070;
+      background: #ff3b3b; color: #fff; font-size: 0.95rem; cursor: pointer;
+    }
+    .media-btn.secondary { background: transparent; color: #ff9090; }
+    .media-btn:hover { filter: brightness(1.1); }
+    #media-stage { display: none; margin-top: 16px; }
+    #media-stage.open { display: block; }
+    #media-stage img, #media-stage video {
+      width: 100%; border-radius: 12px; background: #000; display: block;
+    }
+    #local-video {
+      position: fixed; bottom: 16px; right: 16px; width: 120px;
+      border: 2px solid #ff3b3b; border-radius: 8px; z-index: 10; display: none;
+    }
+    #local-video.live { display: block; }
+    #media-hint { font-size: 0.78rem; color: #888; margin-top: 8px; }
+
     #footer {
       margin-top: 20px;
       font-size: 0.78rem;
@@ -136,7 +157,19 @@
     <div id="duration-text"></div>
     <div id="alert-note"></div>
     <button id="ack-btn" onclick="acknowledge()">Silence alarm</button>
+
+    <div id="media-controls">
+      <button class="media-btn" id="live-btn" onclick="startLiveView()">View live room</button>
+      <button class="media-btn secondary" id="call-btn" onclick="startCall()">Call</button>
+    </div>
+    <div id="media-stage">
+      <img id="live-img" alt="live room" />
+      <video id="remote-video" autoplay playsinline></video>
+      <div id="media-hint"></div>
+      <button class="media-btn secondary" id="end-btn" onclick="endMedia()" style="margin-top:10px;display:none;">End</button>
+    </div>
   </div>
+  <video id="local-video" autoplay playsinline muted></video>
   <div id="footer"><a href="/debug">Debug view</a></div>
 
   <!-- looping alarm tone (silent 1-frame MP3 fallback if context blocks audio) -->
@@ -144,6 +177,8 @@
     <source src="/static/alarm.wav" type="audio/wav">
   </audio>
 
+  <script>window.PI_MEDIA_URL = "{{ pi_media_url }}";</script>
   <script src="/static/app.js"></script>
+  <script src="/static/call.js"></script>
 </body>
 </html>

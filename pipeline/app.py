@@ -15,6 +15,10 @@ from flask import Flask, render_template, jsonify, abort, send_file, request
 from pipeline.store import init_db, get_latest_event, get_recent_events, get_active_alert, get_alerts
 
 DB_PATH = os.environ.get("CONSTANT_DB", "pipeline/constant.db")
+# Where the Pi serves the consent-gated emergency media (live MJPEG + WebRTC signaling).
+# The family browser connects here DIRECTLY (peer-to-peer on the LAN) — video never
+# proxies through this server. Override per deployment.
+PI_MEDIA_URL = os.environ.get("CONSTANT_PI_URL", "http://192.168.4.35:8090")
 
 app = Flask(__name__, template_folder="../templates", static_folder="../static")
 
@@ -32,7 +36,7 @@ def _db():
 
 @app.get("/")
 def family():
-    return render_template("family.html")
+    return render_template("family.html", pi_media_url=PI_MEDIA_URL)
 
 
 @app.get("/debug")
