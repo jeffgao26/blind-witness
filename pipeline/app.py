@@ -11,7 +11,8 @@ Routes:
 """
 import os
 import mimetypes
-from flask import Flask, render_template, jsonify, abort, send_file, request
+from urllib.request import urlopen
+from flask import Flask, render_template, jsonify, abort, send_file, request, Response
 from pipeline.store import init_db, get_latest_event, get_recent_events, get_active_alert, get_alerts
 
 DB_PATH = os.environ.get("CONSTANT_DB", "pipeline/constant.db")
@@ -77,6 +78,31 @@ def api_alerts():
     limit = min(int(request.args.get("limit", 20)), 200)
     alerts = get_alerts(limit=limit, db_path=_db())
     return jsonify(alerts)
+
+
+@app.get("/live")
+def live():
+    """Proxy the consent-gated MJPEG from the on-device media server (localhost:8090)
+    so the family page can show it SAME-ORIGIN — one tunnel (5050), no browser LAN
+    grant. Flask runs on the Pi next to the media server, so the video stays on the Pi
+    (in a cloud split you'd point the browser straight at the device instead)."""
+    try:
+        upstream = urlopen("http://127.0.0.1:8090/emergency", timeout=5)
+    except Exception:
+        return ("No live session is active right now.", 503)
+    ctype = upstream.headers.get("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+
+    def gen():
+        try:
+            while True:
+                chunk = upstream.read(8192)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            upstream.close()
+
+    return Response(gen(), content_type=ctype)
 
 
 @app.get("/clip/<int:alert_id>")

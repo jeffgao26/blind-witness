@@ -19,10 +19,12 @@ function openStage(mode) {
   remote.style.display    = mode === "call" ? "block" : "none";
 }
 
-// One-way: just point the <img> at the Pi's consent-gated MJPEG stream.
+// One-way: same-origin /live route (Flask proxies the Pi's consent-gated MJPEG),
+// so it renders through the single 5050 tunnel — no second port, no browser LAN grant.
 function startLiveView() {
   hint.textContent = "Live view — one way. The room can't see or hear you.";
-  liveImg.src = PI + "/emergency?t=" + Date.now();
+  liveImg.onerror = () => { hint.textContent = "No live session active yet (consent window may still be open)."; };
+  liveImg.src = "/live?t=" + Date.now();
   openStage("live");
 }
 
